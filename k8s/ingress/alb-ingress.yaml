@@ -1,0 +1,92 @@
+# ============================================================
+# k8s/ingress/alb-ingress.yaml
+# ALB Ingress Controller Ingress — routes to both microservices
+# ============================================================
+
+---
+# ClusterSecretStore — connects External Secrets to AWS Secrets Manager
+apiVersion: external-secrets.io/v1beta1
+kind: ClusterSecretStore
+metadata:
+  name: aws-secrets-manager
+spec:
+  provider:
+    aws:
+      service: SecretsManager
+      region: ap-south-1
+      auth:
+        jwt:
+          serviceAccountRef:
+            name: external-secrets-sa
+            namespace: external-secrets
+
+---
+# Ingress for Microservice A
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: microservice-a-ingress
+  namespace: microservice-a
+  annotations:
+    kubernetes.io/ingress.class: alb
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS":443},{"HTTP":80}]'
+    alb.ingress.kubernetes.io/ssl-redirect: "443"
+    alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:ap-south-1:ACCOUNT_ID:certificate/CERT_ID
+    alb.ingress.kubernetes.io/ssl-policy: ELBSecurityPolicy-TLS13-1-2-2021-06
+    alb.ingress.kubernetes.io/healthcheck-path: /health/ready
+    alb.ingress.kubernetes.io/healthcheck-interval-seconds: "15"
+    alb.ingress.kubernetes.io/healthy-threshold-count: "2"
+    alb.ingress.kubernetes.io/unhealthy-threshold-count: "3"
+    alb.ingress.kubernetes.io/load-balancer-attributes: |
+      access_logs.s3.enabled=true,
+      access_logs.s3.bucket=prod-alb-logs,
+      deletion_protection.enabled=true,
+      routing.http.drop_invalid_header_fields.enabled=true
+    alb.ingress.kubernetes.io/wafv2-acl-arn: arn:aws:wafv2:ap-south-1:ACCOUNT_ID:regional/webacl/alb-waf-acl/WAF_ID
+    alb.ingress.kubernetes.io/shield-advanced-protection: "true"
+    alb.ingress.kubernetes.io/group.name: prod-alb-group
+    alb.ingress.kubernetes.io/group.order: "10"
+spec:
+  rules:
+    - host: api.example.com
+      http:
+        paths:
+          - path: /api/v1
+            pathType: Prefix
+            backend:
+              service:
+                name: microservice-a
+                port:
+                  number: 80
+
+---
+# Ingress for Microservice B
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: microservice-b-ingress
+  namespace: microservice-b
+  annotations:
+    kubernetes.io/ingress.class: alb
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS":443}]'
+    alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:ap-south-1:ACCOUNT_ID:certificate/CERT_ID
+    alb.ingress.kubernetes.io/healthcheck-path: /ready
+    alb.ingress.kubernetes.io/wafv2-acl-arn: arn:aws:wafv2:ap-south-1:ACCOUNT_ID:regional/webacl/alb-waf-acl/WAF_ID
+    alb.ingress.kubernetes.io/group.name: prod-alb-group
+    alb.ingress.kubernetes.io/group.order: "20"
+spec:
+  rules:
+    - host: api.example.com
+      http:
+        paths:
+          - path: /api/v2
+            pathType: Prefix
+            backend:
+              service:
+                name: microservice-b
+                port:
+                  number: 80

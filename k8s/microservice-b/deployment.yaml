@@ -1,0 +1,253 @@
+# ============================================================
+# k8s/microservice-b/deployment.yaml
+# Microservice B — background processor (Python/FastAPI)
+# Consumes PostgreSQL + communicates with Microservice A
+# ============================================================
+
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: microservice-b
+  labels:
+    name: microservice-b
+    pod-security.kubernetes.io/enforce: restricted
+
+---
+apiVersion: external-secrets.io/v1beta1
+kind: ExternalSecret
+metadata:
+  name: postgres-credentials
+  namespace: microservice-b
+spec:
+  refreshInterval: "1h"
+  secretStoreRef:
+    kind: ClusterSecretStore
+    name: aws-secrets-manager
+  target:
+    name: postgres-credentials
+    creationPolicy: Owner
+  data:
+    - secretKey: DB_HOST
+      remoteRef:
+        key: prod/postgres/credentials
+        property: host
+    - secretKey: DB_PORT
+      remoteRef:
+        key: prod/postgres/credentials
+        property: port
+    - secretKey: DB_NAME
+      remoteRef:
+        key: prod/postgres/credentials
+        property: dbname
+    - secretKey: DB_USER
+      remoteRef:
+        key: prod/postgres/credentials
+        property: username
+    - secretKey: DB_PASSWORD
+      remoteRef:
+        key: prod/postgres/credentials
+        property: password
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: microservice-b
+  namespace: microservice-b
+  labels:
+    app: microservice-b
+    version: "1.0.0"
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: microservice-b
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: microservice-b
+        version: "1.0.0"
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: microservice-b-sa
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app: microservice-b
+      tolerations:
+        - key: dedicated
+          value: app
+          effect: NoSchedule
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        fsGroup: 1001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: microservice-b
+          image: 123456789.dkr.ecr.ap-south-1.amazonaws.com/microservice-b:1.0.0
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8000
+              name: http
+          envFrom:
+            - secretRef:
+                name: postgres-credentials
+          env:
+            - name: ENV
+              value: production
+            - name: PORT
+              value: "8000"
+            - name: SERVICE_A_URL
+              value: "http://microservice-a.microservice-a.svc.cluster.local"
+            - name: DB_SSL_MODE
+              value: require
+            - name: DB_POOL_SIZE
+              value: "5"
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              cpu: 800m
+              memory: 512Mi
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 20
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 1001
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: cache
+              mountPath: /app/.cache
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: cache
+          emptyDir: {}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: microservice-b
+  namespace: microservice-b
+spec:
+  type: ClusterIP
+  selector:
+    app: microservice-b
+  ports:
+    - port: 80
+      targetPort: 8000
+      name: http
+
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: microservice-b-hpa
+  namespace: microservice-b
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: microservice-b
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 75
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: microservice-b-pdb
+  namespace: microservice-b
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: microservice-b
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: microservice-b-sa
+  namespace: microservice-b
+  annotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::ACCOUNT_ID:role/microservice-b-role
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: microservice-b-netpol
+  namespace: microservice-b
+spec:
+  podSelector:
+    matchLabels:
+      app: microservice-b
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: ingress-nginx
+      ports:
+        - port: 8000
+  egress:
+    - ports:
+        - port: 5432   # PostgreSQL
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    - ports:
+        - port: 443    # AWS APIs + Microservice A
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              name: microservice-a
+      ports:
+        - port: 80
